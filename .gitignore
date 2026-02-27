@@ -1,0 +1,30 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Local media and generated artifacts
+input/
+output/
+overlays/*.mp4
+overlays/*.mov
+overlays/*.mkv
+overlays/*.m4v
+overlays/*.avi
+overlays/*.webm
+
+# Logs
+*.log
