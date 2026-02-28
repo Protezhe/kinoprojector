@@ -43,6 +43,44 @@ def is_video(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in VIDEO_EXTS
 
 
+def parse_timecode_to_seconds(value: str) -> float:
+    raw = value.strip()
+    if not raw:
+        raise argparse.ArgumentTypeError("Пустое значение таймкода")
+
+    try:
+        if ":" not in raw:
+            seconds = float(raw)
+        else:
+            parts = raw.split(":")
+            if len(parts) not in (2, 3):
+                raise ValueError
+
+            if len(parts) == 2:
+                hours = 0.0
+                minutes = float(parts[0])
+                secs = float(parts[1])
+            else:
+                hours = float(parts[0])
+                minutes = float(parts[1])
+                secs = float(parts[2])
+
+            seconds = hours * 3600 + minutes * 60 + secs
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Некорректный таймкод '{value}'. Используй секунды или HH:MM:SS(.ms)"
+        ) from exc
+
+    if seconds < 0:
+        raise argparse.ArgumentTypeError("Таймкод должен быть >= 0")
+
+    return seconds
+
+
+def format_seconds(seconds: float) -> str:
+    return f"{seconds:.6f}".rstrip("0").rstrip(".") or "0"
+
+
 def pick_file(root: Path, dirname: str, exts: set[str]) -> Path | None:
     src_dir = root / dirname
     if not src_dir.exists():
@@ -203,6 +241,22 @@ def main() -> None:
     parser.add_argument("--fast-m1", action="store_true", help="Use Apple VideoToolbox (h264_videotoolbox) for faster encoding on Apple Silicon")
     parser.add_argument("--fast-m1-bitrate", default="12M", help="Target bitrate for --fast-m1 mode, e.g. 8M, 12M, 20M")
     parser.add_argument("--final-only", action="store_true", help="Delete intermediate step files and keep only final output")
+    parser.add_argument(
+        "--in-sec",
+        "--start-sec",
+        dest="in_sec",
+        type=parse_timecode_to_seconds,
+        default=0.0,
+        help="Start processing from this time (seconds or HH:MM:SS(.ms)); default: 0",
+    )
+    parser.add_argument(
+        "--out-sec",
+        "--end-sec",
+        dest="out_sec",
+        type=parse_timecode_to_seconds,
+        default=20.0,
+        help="Stop processing at this time (seconds or HH:MM:SS(.ms)); default: 20",
+    )
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -238,10 +292,14 @@ def main() -> None:
         raise SystemExit("--sepia-intensity должен быть в диапазоне 0..1")
     if not (0.0 <= args.sepia_warmth <= 1.0):
         raise SystemExit("--sepia-warmth должен быть в диапазоне 0..1")
+    if args.out_sec <= args.in_sec:
+        raise SystemExit("--out-sec должен быть больше --in-sec")
 
     shutter_dark_factor = args.shutter_percent / 100.0 if args.shutter_percent is not None else args.shutter_dark_factor
     if args.simulate_shutter and not (0.0 <= shutter_dark_factor <= 1.0):
         raise SystemExit("--shutter-dark-factor должен быть в диапазоне 0..1")
+
+    print(f"Диапазон обработки: {format_seconds(args.in_sec)}s -> {format_seconds(args.out_sec)}s")
 
     for src in files:
         step01, step01_sepia, step02, step03, step04, step05 = build_step_paths(output_dir, src, args)
@@ -289,6 +347,8 @@ def main() -> None:
             cmd = [
                 "ffmpeg",
                 "-y",
+                "-ss", format_seconds(args.in_sec),
+                "-to", format_seconds(args.out_sec),
                 "-i", str(src),
             ]
             if overlay is not None:

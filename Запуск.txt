@@ -1,1 +1,4 @@
-./run.sh --dust --gate-weave --gate-weave-max-x 0.8 --gate-weave-max-y 2 --simulate-shutter --shutter-percent 85 --final-only --fast-m1 --fast-24fps --sepia --sepia-intensity 0.7 --sepia-warmth 0.95 --mask
+./run.sh --dust --gate-weave --gate-weave-max-x 0.8 --gate-weave-max-y 2 --simulate-shutter --shutter-percent 95 --final-only --fast-m1 --fast-24fps --sepia --sepia-intensity 0.7 --sepia-warmth 0.95 --mask
+# По умолчанию обрабатывается диапазон 0-20 сек.
+# Для своего диапазона добавь --in-sec и --out-sec (или --start-sec/--end-sec):
+./run.sh --in-sec 0 --out-sec 37 --dust --gate-weave --gate-weave-max-x 0.8 --gate-weave-max-y 2 --simulate-shutter --shutter-percent 95 --final-only --fast-m1 --fast-24fps --sepia --sepia-intensity 0.7 --sepia-warmth 0.95 --mask
