@@ -148,14 +148,15 @@ def build_filter_complex(
         out = next_label()
         ov = f"ov_{stage}"
         base = f"base_{stage}"
-        blend = (
-            f"blend=c0_mode={args.dust_mode}:c0_opacity={args.dust_opacity}:"
-            "c1_mode=normal:c1_opacity=1:"
-            "c2_mode=normal:c2_opacity=1:"
-            "shortest=1"
-        )
+        ov_rgb = f"ov_rgb_{stage}"
+        base_rgb = f"base_rgb_{stage}"
+        blend_out = f"blend_out_{stage}"
+        blend = f"blend=all_mode={args.dust_mode}:all_opacity={args.dust_opacity}:shortest=1"
         filters.append(f"[{overlay_input_index}:v][{current}]scale2ref=iw:ih[{ov}][{base}]")
-        filters.append(f"[{base}][{ov}]{blend}[{out}]")
+        filters.append(f"[{base}]format=gbrp[{base_rgb}]")
+        filters.append(f"[{ov}]format=gbrp[{ov_rgb}]")
+        filters.append(f"[{base_rgb}][{ov_rgb}]{blend}[{blend_out}]")
+        filters.append(f"[{blend_out}]format=yuv420p[{out}]")
         current = out
 
     if args.gate_weave:
