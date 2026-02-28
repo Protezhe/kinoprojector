@@ -28,3 +28,6 @@ overlays/*.webm
 
 # Logs
 *.log
+*.mp4
+*.mov
+*.mkv
