@@ -22,9 +22,10 @@ def run(cmd: list[str]) -> None:
 def ffmpeg_exists() -> None:
     try:
         subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        subprocess.run(["ffprobe", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
     except Exception:
         raise SystemExit(
-            "ffmpeg не найден. Установи: \n"
+            "ffmpeg/ffprobe не найдены. Установи: \n"
             "  brew install ffmpeg\n"
         )
 
@@ -79,6 +80,30 @@ def parse_timecode_to_seconds(value: str) -> float:
 
 def format_seconds(seconds: float) -> str:
     return f"{seconds:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def probe_duration_seconds(path: Path) -> float:
+    p = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        raise SystemExit(f"Не удалось прочитать длительность файла: {path.name}")
+    try:
+        duration = float(p.stdout.strip())
+    except ValueError as exc:
+        raise SystemExit(f"Некорректная длительность файла: {path.name}") from exc
+    if duration <= 0.0:
+        raise SystemExit(f"Длительность файла должна быть > 0: {path.name}")
+    return duration
 
 
 def pick_file(root: Path, dirname: str, exts: set[str]) -> Path | None:
@@ -197,6 +222,18 @@ def build_filter_complex(
         filters.append(f"[{base}][{msk}]overlay=shortest=1[{out}]")
         current = out
 
+    if args.scale < 1.0:
+        out = next_label()
+        scale_src_bg = f"scale_src_bg_{stage}"
+        scale_src_fg = f"scale_src_fg_{stage}"
+        scale_bg = f"scale_bg_{stage}"
+        scale_fg = f"scale_fg_{stage}"
+        filters.append(f"[{current}]split=2[{scale_src_bg}][{scale_src_fg}]")
+        filters.append(f"[{scale_src_bg}]drawbox=x=0:y=0:w=iw:h=ih:color=black:t=fill[{scale_bg}]")
+        filters.append(f"[{scale_src_fg}]scale=iw*{args.scale:.6f}:ih*{args.scale:.6f}[{scale_fg}]")
+        filters.append(f"[{scale_bg}][{scale_fg}]overlay=(W-w)/2:(H-h)/2[{out}]")
+        current = out
+
     # Нормализуем формат на выходе фильтрграфа, чтобы избежать
     # несовместимостей с энкодерами (особенно h264_videotoolbox).
     out = next_label()
@@ -206,16 +243,27 @@ def build_filter_complex(
     return ";".join(filters), current
 
 
-def build_step_paths(output_dir: Path, src: Path, args: argparse.Namespace) -> tuple[Path, Path, Path, Path, Path, Path]:
-    step01 = output_dir / f"step01_base24_{src.stem}.mp4"
+def build_step_paths(
+    output_dir: Path,
+    src: Path,
+    args: argparse.Namespace,
+    segment: str,
+    seg_start: float,
+    seg_end: float,
+) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
+    start_tag = int(round(seg_start * 100))
+    end_tag = int(round(seg_end * 100))
+    clip_tag = f"{segment}_s{start_tag:07d}_e{end_tag:07d}"
+    step00 = output_dir / f"step00_cut_{clip_tag}_{src.stem}.mp4"
+    step01 = output_dir / f"step01_base24_{clip_tag}_{src.stem}.mp4"
     sepia_i_tag = int(round(args.sepia_intensity * 100))
     sepia_w_tag = int(round(args.sepia_warmth * 100))
-    step01_sepia = output_dir / f"step01_sepia_i{sepia_i_tag:03d}_w{sepia_w_tag:03d}_{src.stem}.mp4"
-    step02 = output_dir / f"step02_dust_{src.stem}.mp4"
-    step03 = output_dir / f"step03_gateweave_{src.stem}.mp4"
-    step04 = output_dir / f"step04_shutter_{src.stem}.mp4"
-    step05 = output_dir / f"step05_mask_{src.stem}.mp4"
-    return step01, step01_sepia, step02, step03, step04, step05
+    step01_sepia = output_dir / f"step01_sepia_i{sepia_i_tag:03d}_w{sepia_w_tag:03d}_{clip_tag}_{src.stem}.mp4"
+    step02 = output_dir / f"step02_dust_{clip_tag}_{src.stem}.mp4"
+    step03 = output_dir / f"step03_gateweave_{clip_tag}_{src.stem}.mp4"
+    step04 = output_dir / f"step04_shutter_{clip_tag}_{src.stem}.mp4"
+    step05 = output_dir / f"step05_mask_{clip_tag}_{src.stem}.mp4"
+    return step00, step01, step01_sepia, step02, step03, step04, step05
 
 
 def main() -> None:
@@ -242,21 +290,31 @@ def main() -> None:
     parser.add_argument("--fast-m1", action="store_true", help="Use Apple VideoToolbox (h264_videotoolbox) for faster encoding on Apple Silicon")
     parser.add_argument("--fast-m1-bitrate", default="12M", help="Target bitrate for --fast-m1 mode, e.g. 8M, 12M, 20M")
     parser.add_argument("--final-only", action="store_true", help="Delete intermediate step files and keep only final output")
+    parser.add_argument("--scale", type=float, default=1.0, help="Final frame scale in range (0..1], e.g. 0.7")
     parser.add_argument(
         "--in-sec",
         "--start-sec",
         dest="in_sec",
         type=parse_timecode_to_seconds,
         default=0.0,
-        help="Start processing from this time (seconds or HH:MM:SS(.ms)); default: 0",
+        help="Deprecated. Должен быть 0",
     )
     parser.add_argument(
         "--out-sec",
+        "--head-sec",
         "--end-sec",
         dest="out_sec",
         type=parse_timecode_to_seconds,
         default=20.0,
-        help="Stop processing at this time (seconds or HH:MM:SS(.ms)); default: 20",
+        help="End time (sec) of first fragment from start: 0 -> out-sec",
+    )
+    parser.add_argument(
+        "--tail-sec",
+        "--from-end-sec",
+        dest="tail_sec",
+        type=parse_timecode_to_seconds,
+        default=37.0,
+        help="Length (sec) of second fragment from the end: -tail-sec -> end",
     )
     args = parser.parse_args()
 
@@ -293,123 +351,160 @@ def main() -> None:
         raise SystemExit("--sepia-intensity должен быть в диапазоне 0..1")
     if not (0.0 <= args.sepia_warmth <= 1.0):
         raise SystemExit("--sepia-warmth должен быть в диапазоне 0..1")
-    if args.out_sec <= args.in_sec:
-        raise SystemExit("--out-sec должен быть больше --in-sec")
+    if not (0.0 < args.scale <= 1.0):
+        raise SystemExit("--scale должен быть в диапазоне (0..1]")
+    if args.in_sec != 0.0:
+        raise SystemExit("--in-sec устарел и должен быть равен 0")
+    if args.out_sec <= 0.0:
+        raise SystemExit("--out-sec должен быть > 0")
+    if args.tail_sec < 0.0:
+        raise SystemExit("--tail-sec должен быть >= 0")
 
     shutter_dark_factor = args.shutter_percent / 100.0 if args.shutter_percent is not None else args.shutter_dark_factor
     if args.simulate_shutter and not (0.0 <= shutter_dark_factor <= 1.0):
         raise SystemExit("--shutter-dark-factor должен быть в диапазоне 0..1")
 
-    print(f"Диапазон обработки: {format_seconds(args.in_sec)}s -> {format_seconds(args.out_sec)}s")
+    print(
+        "Фрагменты: "
+        f"0 -> {format_seconds(args.out_sec)}s и "
+        f"-{format_seconds(args.tail_sec)}s -> финал"
+    )
 
     for src in files:
-        step01, step01_sepia, step02, step03, step04, step05 = build_step_paths(output_dir, src, args)
-        target = src
+        duration = probe_duration_seconds(src)
+        head_end = min(args.out_sec, duration)
+        tail_start = max(duration - args.tail_sec, 0.0)
 
-        if not args.skip_24fps:
-            target = step01
-        if args.sepia:
-            target = step01_sepia
-        if args.dust:
-            target = step02
-        if args.gate_weave:
-            target = step03
-        if args.simulate_shutter:
-            target = step04
-        if args.mask:
-            target = step05
+        segments: list[tuple[str, float, float]] = []
+        if head_end > 0.0:
+            segments.append(("head", 0.0, head_end))
+        if args.tail_sec > 0.0 and tail_start < duration:
+            segments.append(("tail", tail_start, duration))
 
-        if target == src:
-            print(f"⏭ Пропускаю (нет активных шагов): {src.name}")
-            continue
+        if not segments:
+            raise SystemExit(f"Пустые диапазоны нарезки для файла: {src.name}")
 
-        if target.exists():
-            print(f"⏭ Пропускаю (уже есть): {target.name}")
-        else:
-            overlay = pick_overlay(root) if args.dust else None
-            if args.dust and overlay is None:
-                raise SystemExit("Нет overlay-файлов в папке overlays/")
+        print(
+            f"🎬 {src.name}: "
+            f"начало 0 -> {format_seconds(head_end)}s, "
+            f"конец {format_seconds(tail_start)}s -> {format_seconds(duration)}s"
+        )
 
-            mask = pick_mask(root) if args.mask else None
-            if args.mask and mask is None:
-                raise SystemExit("Нет mask-файлов в папке mask/")
+        for segment_name, seg_start, seg_end in segments:
+            step00, step01, step01_sepia, step02, step03, step04, step05 = build_step_paths(
+                output_dir,
+                src,
+                args,
+                segment_name,
+                seg_start,
+                seg_end,
+            )
+            target = step00
 
-            overlay_input_index = None
-            mask_input_index = None
-            next_input_index = 1
-            if overlay is not None:
-                overlay_input_index = next_input_index
-                next_input_index += 1
-            if mask is not None:
-                mask_input_index = next_input_index
+            if not args.skip_24fps:
+                target = step01
+            if args.sepia:
+                target = step01_sepia
+            if args.dust:
+                target = step02
+            if args.gate_weave:
+                target = step03
+            if args.simulate_shutter:
+                target = step04
+            if args.mask:
+                target = step05
 
-            filter_complex, out_label = build_filter_complex(args, overlay_input_index, mask_input_index)
+            if target.exists():
+                print(f"⏭ Пропускаю {segment_name} (уже есть): {target.name}")
+            else:
+                print(
+                    f"🎞 Обработка {segment_name}: "
+                    f"{format_seconds(seg_start)}s -> {format_seconds(seg_end)}s"
+                )
+                overlay = pick_overlay(root) if args.dust else None
+                if args.dust and overlay is None:
+                    raise SystemExit("Нет overlay-файлов в папке overlays/")
 
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-ss", format_seconds(args.in_sec),
-                "-to", format_seconds(args.out_sec),
-                "-i", str(src),
-            ]
-            if overlay is not None:
-                cmd += [
-                    "-stream_loop", "-1",
-                    "-i", str(overlay),
+                mask = pick_mask(root) if args.mask else None
+                if args.mask and mask is None:
+                    raise SystemExit("Нет mask-файлов в папке mask/")
+
+                overlay_input_index = None
+                mask_input_index = None
+                next_input_index = 1
+                if overlay is not None:
+                    overlay_input_index = next_input_index
+                    next_input_index += 1
+                if mask is not None:
+                    mask_input_index = next_input_index
+
+                filter_complex, out_label = build_filter_complex(args, overlay_input_index, mask_input_index)
+
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-ss", format_seconds(seg_start),
+                    "-to", format_seconds(seg_end),
+                    "-i", str(src),
                 ]
-            if mask is not None:
-                if mask.suffix.lower() in IMAGE_EXTS:
-                    cmd += [
-                        "-loop", "1",
-                        "-i", str(mask),
-                    ]
-                else:
+                if overlay is not None:
                     cmd += [
                         "-stream_loop", "-1",
-                        "-i", str(mask),
+                        "-i", str(overlay),
                     ]
+                if mask is not None:
+                    if mask.suffix.lower() in IMAGE_EXTS:
+                        cmd += [
+                            "-loop", "1",
+                            "-i", str(mask),
+                        ]
+                    else:
+                        cmd += [
+                            "-stream_loop", "-1",
+                            "-i", str(mask),
+                        ]
 
-            cmd += [
-                "-filter_complex", filter_complex,
-                "-map", f"[{out_label}]",
-                "-map", "0:a?",
-            ]
-            crf = str(args.dust_crf) if args.dust else "18"
-            preset = args.dust_preset if args.dust else "medium"
-            sw_video_args = [
-                "-c:v", "libx264",
-                "-crf", crf,
-                "-preset", preset,
-            ]
-            fast_video_args = [
-                "-c:v", "h264_videotoolbox",
-                "-b:v", args.fast_m1_bitrate,
-                "-allow_sw", "1",
-            ]
-            cmd += [
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "192k",
-            ]
-            if overlay is not None or mask is not None:
-                cmd += ["-shortest"]
-            tail = [str(target)]
+                cmd += [
+                    "-filter_complex", filter_complex,
+                    "-map", f"[{out_label}]",
+                    "-map", "0:a?",
+                ]
+                crf = str(args.dust_crf) if args.dust else "18"
+                preset = args.dust_preset if args.dust else "medium"
+                sw_video_args = [
+                    "-c:v", "libx264",
+                    "-crf", crf,
+                    "-preset", preset,
+                ]
+                fast_video_args = [
+                    "-c:v", "h264_videotoolbox",
+                    "-b:v", args.fast_m1_bitrate,
+                    "-allow_sw", "1",
+                ]
+                cmd += [
+                    "-pix_fmt", "yuv420p",
+                    "-c:a", "aac",
+                    "-b:a", "192k",
+                ]
+                if overlay is not None or mask is not None:
+                    cmd += ["-shortest"]
+                tail = [str(target)]
 
-            if args.fast_m1:
-                try:
-                    run(cmd + fast_video_args + tail)
-                except RuntimeError:
-                    print("⚠️ VideoToolbox не смог стартовать, повторяю через libx264.")
+                if args.fast_m1:
+                    try:
+                        run(cmd + fast_video_args + tail)
+                    except RuntimeError:
+                        print("⚠️ VideoToolbox не смог стартовать, повторяю через libx264.")
+                        run(cmd + sw_video_args + tail)
+                else:
                     run(cmd + sw_video_args + tail)
-            else:
-                run(cmd + sw_video_args + tail)
 
-        if args.final_only:
-            for step in (step01, step01_sepia, step02, step03, step04, step05):
-                if step == target or not step.exists():
-                    continue
-                step.unlink()
-                print(f"🧹 Удален промежуточный файл: {step.name}")
+            if args.final_only:
+                for step in (step00, step01, step01_sepia, step02, step03, step04, step05):
+                    if step == target or not step.exists():
+                        continue
+                    step.unlink()
+                    print(f"🧹 Удален промежуточный файл: {step.name}")
 
     print("\n✅ Готово. Результаты в папке output/")
 
